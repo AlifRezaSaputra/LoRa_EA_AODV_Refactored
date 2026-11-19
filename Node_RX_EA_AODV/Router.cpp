@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "esp_system.h"
+
 #include "Config.h"
 #include "Hardware.h"
 #include "PacketFormat.h"
@@ -9,11 +9,7 @@
 // Forward declaration diperlukan karena file .cpp tidak memakai auto-prototype Arduino.
 int transmitFrame(const String& frame);
 
-// Boot session token 32-bit (probabilistic global uniqueness generated once via esp_random())
-uint32_t globalBootId = 0;
-
 // ================================ STATE ===================================
-
 unsigned long lastStatus = 0;
 unsigned long lastRxActivity = 0;
 unsigned long lastHelloAt = 0;
@@ -42,6 +38,7 @@ struct RouteEntry {
   uint8_t minEnergy = 0;
   uint8_t hops = 0;
   unsigned long updatedAt = 0;
+  unsigned long lifetimeMs = MY_ROUTE_TIMEOUT_MS;
 };
 RouteEntry routeTable[MAX_ROUTE_ENTRIES];
 
@@ -85,8 +82,13 @@ void processNeighborMaintenance() {
   unsigned long now=millis();
   if (now-lastHelloAt>=HELLO_INTERVAL) { lastHelloAt=now; transmitFrame(String("HELLO|")+BASE_ID); }
   for (uint8_t i=0;i<MAX_ROUTE_ENTRIES;i++) {
-    if (routeTable[i].used && routeTable[i].nextHop.length() && !neighborAlive(routeTable[i].nextHop)) {
-      Serial.print("[LINK] Route ke "); Serial.print(routeTable[i].destination); Serial.println(" invalid: next-hop timeout");
+    if (!routeTable[i].used) continue;
+    if (now - routeTable[i].updatedAt > routeTable[i].lifetimeMs) {
+      routeTable[i].used = false;
+      continue;
+    }
+    if (routeTable[i].nextHop.length() && !neighborAlive(routeTable[i].nextHop)) {
+      Serial.print("[LINK] Route ke "); Serial.print(routeTable[i].destination); Serial.println(" invalid: neighbor timeout");
       routeTable[i].used=false; countRouteFailures++;
     }
   }
@@ -127,16 +129,22 @@ int transmitFrame(const String& frame) {
 }
 
 int findRouteIndex(const String& destination, bool refresh = true) {
-  unsigned long now = millis();
+  const unsigned long now = millis();
   for (uint8_t i = 0; i < MAX_ROUTE_ENTRIES; ++i) {
-    if (!routeTable[i].used || routeTable[i].destination != destination) continue;
-    if (now - routeTable[i].updatedAt > ROUTE_LIFETIME) {
-      routeTable[i].used = false;
+    RouteEntry& route = routeTable[i];
+    if (!route.used || route.destination != destination) continue;
+    const unsigned long elapsed = now - route.updatedAt;
+    if (elapsed > route.lifetimeMs) {
+      route.used = false;
       Serial.print("[ROUTE] Rute kedaluwarsa ke ");
       Serial.println(destination);
       continue;
     }
-    if (refresh) routeTable[i].updatedAt = now;
+    // AODV memperpanjang lifetime ke max(sisa lifetime, ActiveRouteTimeout).
+    if (refresh && (route.lifetimeMs - elapsed) < ACTIVE_ROUTE_TIMEOUT_MS) {
+      route.updatedAt = now;
+      route.lifetimeMs = ACTIVE_ROUTE_TIMEOUT_MS;
+    }
     return i;
   }
   return -1;
@@ -174,6 +182,7 @@ void installRoute(const String& destination, const String& nextHop, const String
   routeTable[slot].minEnergy = minEnergy;
   routeTable[slot].hops = hops;
   routeTable[slot].updatedAt = millis();
+  routeTable[slot].lifetimeMs = MY_ROUTE_TIMEOUT_MS;
   Serial.print("[ROUTE] "); Serial.print(NODE_ID);
   Serial.print(" -> "); Serial.print(destination);
   Serial.print(" via "); Serial.print(nextHop);
@@ -470,51 +479,20 @@ void handlePacket(const String& packet) {
 
 void pollRadio() {
   String packet;
-  int radioState = HW_RADIO_OK;
+  int state = HW_RADIO_OK;
+  if (!rxPollRadio(packet, state)) return;
 
-  float rssiDbm = 0.0;
-  float snrDb = 0.0;
-
-  if (!rxPollRadio(packet, radioState, rssiDbm, snrDb)) {
-    return;
-  }
-
-  if (radioState == HW_RADIO_OK && packet.length() > 0) {
-
-    lastRxActivity = millis();
-
-    Serial.println();
-    Serial.println("[RADIO] Paket diterima!");
-
-    Serial.print("[RADIO] RSSI: ");
-    Serial.print(rssiDbm);
-    Serial.print(" dBm | SNR: ");
-    Serial.print(snrDb);
-    Serial.println(" dB");
-
-    Serial.print("[RX] Payload: ");
-    Serial.println(packet);
-
-    // Proses paket berdasarkan jenisnya
+  lastRxActivity = millis();
+  if (state == HW_RADIO_OK && packet.length()) {
     handlePacket(packet);
-
-  } 
-  else if (radioState == HW_RADIO_CRC_MISMATCH) {
+  } else if (state == HW_RADIO_CRC_MISMATCH) {
     countCrcErr++;
-    Serial.println("[RADIO] CRC mismatch!");
-
-  } 
-  else {
-    Serial.println("[RADIO] Kesalahan penerimaan paket.");
   }
 }
 
 
 // ================================ APP API =================================
 void routerBegin() {
-  globalBootId = esp_random();
-  Serial.print("[BOOT] Basecamp Boot Session ID (boot_id): 0x");
-  Serial.println(globalBootId, HEX);
   Serial.begin(115200);
   randomSeed((uint32_t)micros() ^ (uint32_t)analogRead(34));
   delay(200);

@@ -1,16 +1,12 @@
 #include <Arduino.h>
-#include "esp_system.h"
+
 #include "Config.h"
 #include "Hardware.h"
 #include "PacketFormat.h"
 #include "Router.h"
 #include "SeenEntry.h"
 
-// Boot session token 32-bit (probabilistic global uniqueness generated once via esp_random())
-uint32_t globalBootId = 0;
-
 // ================================ STATE ===================================
-
 uint32_t seqNumber = 0;
 uint32_t rreqId = 0;
 unsigned long lastSend = 0;
@@ -19,8 +15,9 @@ unsigned long lastBatteryCheck = 0;
 unsigned long lastHelloAt = 0;
 unsigned long lastRreqForwardAt = 0;
 unsigned long nextRreqRetryAt = 0;
-uint8_t currentRreqTtl = RREQ_INITIAL_TTL;
-uint8_t rreqRetryCount = 0;
+uint8_t currentRreqTtl = TTL_START;
+uint8_t rreqMaxTtlCount = 0;
+bool routeDiscoveryExhausted = false;
 uint32_t countRreqForwarded = 0, countDataForwarded = 0, countRerrSent = 0;
 uint32_t countRouteDiscoveries = 0, countRouteFailures = 0;
 uint32_t countAckSuccess = 0; uint64_t totalAckRttMs = 0;
@@ -44,7 +41,7 @@ uint32_t countAckTimeout = 0;
 uint32_t countRouteDiscoveryCompleted = 0;
 uint64_t totalRouteDiscoveryMs = 0;
 unsigned long routeDiscoveryStartedAt = 0;
-unsigned long currentAckTimeoutMs = ACK_TIMEOUT_BASE_MS;
+unsigned long currentAckTimeoutMs = DATA_ACK_TIMEOUT_MS;
 String lastSentPayload = "";
 
 // ============================ ROUTING TABLE ===============================
@@ -54,6 +51,7 @@ struct RouteEntry {
   String nextHop;
   String path;
   unsigned long updatedAt = 0;
+  unsigned long lifetimeMs = MY_ROUTE_TIMEOUT_MS;
 };
 RouteEntry routeTable[MAX_ROUTE_ENTRIES];
 
@@ -142,16 +140,22 @@ bool neighborAlive(const String& id) {
 
 // ============================= ROUTE TABLE ================================
 int findRouteIndex(const String& destination, bool refresh = true) {
-  unsigned long now = millis();
+  const unsigned long now = millis();
   for (uint8_t i = 0; i < MAX_ROUTE_ENTRIES; ++i) {
-    if (!routeTable[i].used || routeTable[i].destination != destination) continue;
-    if (now - routeTable[i].updatedAt > ROUTE_LIFETIME) {
-      routeTable[i].used = false;
+    RouteEntry& route = routeTable[i];
+    if (!route.used || route.destination != destination) continue;
+    const unsigned long elapsed = now - route.updatedAt;
+    if (elapsed > route.lifetimeMs) {
+      route.used = false;
       Serial.print("[ROUTE] Rute kedaluwarsa ke ");
       Serial.println(destination);
       continue;
     }
-    if (refresh) routeTable[i].updatedAt = now;
+    // AODV memperpanjang lifetime ke max(sisa lifetime, ActiveRouteTimeout).
+    if (refresh && (route.lifetimeMs - elapsed) < ACTIVE_ROUTE_TIMEOUT_MS) {
+      route.updatedAt = now;
+      route.lifetimeMs = ACTIVE_ROUTE_TIMEOUT_MS;
+    }
     return i;
   }
   return -1;
@@ -186,6 +190,7 @@ void installRoute(const String& destination, const String& nextHop, const String
   routeTable[slot].nextHop = nextHop;
   routeTable[slot].path = path;
   routeTable[slot].updatedAt = millis();
+  routeTable[slot].lifetimeMs = MY_ROUTE_TIMEOUT_MS;
   Serial.print("[ROUTE] "); Serial.print(NODE_ID);
   Serial.print(" -> "); Serial.print(destination);
   Serial.print(" via "); Serial.print(nextHop);
@@ -210,15 +215,25 @@ void invalidateRoutesByPath(const String& path) {
 void processNeighborMaintenance() {
   unsigned long now = millis();
   if (now - lastHelloAt >= HELLO_INTERVAL) {
-    lastHelloAt = now; enqueueFrame(String("HELLO|") + NODE_ID, random(0, 1000));
+    lastHelloAt = now; enqueueFrame(String("HELLO|") + NODE_ID, random(0, 11));
   }
   for (uint8_t i=0;i<MAX_ROUTE_ENTRIES;i++) {
-    if (!routeTable[i].used || now - routeTable[i].updatedAt > ROUTE_LIFETIME) continue;
+    if (!routeTable[i].used) continue;
+    if (now - routeTable[i].updatedAt > routeTable[i].lifetimeMs) {
+      routeTable[i].used = false;
+      continue;
+    }
     if (routeTable[i].nextHop.length() && !neighborAlive(routeTable[i].nextHop)) {
       Serial.print("[LINK] Next-hop tidak aktif: "); Serial.println(routeTable[i].nextHop);
       String broken = routeTable[i].path; String dest = routeTable[i].destination;
       routeTable[i].used = false; sendRouteError(broken, 0); countRouteFailures++;
-      if (dest == String(BASE_ID)) { routeDiscoveryInProgress = false; nextRreqRetryAt = now; }
+      if (dest == String(BASE_ID)) {
+        routeDiscoveryInProgress = false;
+        currentRreqTtl = TTL_START;
+        rreqMaxTtlCount = 0;
+        routeDiscoveryExhausted = false;
+        nextRreqRetryAt = now;
+      }
     }
   }
 }
@@ -258,18 +273,42 @@ bool acceptBetterRreq(const String& key, const String& path, uint8_t energy, uin
 }
 
 // ============================== DISCOVERY ================================
+unsigned long calculateRreqRetryDelayMs(uint8_t ttl) {
+  // Sama dengan ScheduleRreqRetry() pada AODV original.
+  if (ttl < NET_DIAMETER) {
+    return 2UL * NODE_TRAVERSAL_TIME_MS * (ttl + TIMEOUT_BUFFER);
+  }
+  const uint8_t backoffExponent = (rreqMaxTtlCount > 0) ? (rreqMaxTtlCount - 1) : 0;
+  return NET_TRAVERSAL_TIME_MS * (1UL << backoffExponent);
+}
+
 void sendRouteRequest() {
-  uint8_t energy = USE_EA_AODV ? txGetResidualEnergyPercent() : 100;
-  rreqId++; countRouteDiscoveries++;
+  // Jika discovery sebelumnya habis RreqRetries, permintaan baru mulai dari TtlStart.
+  if (routeDiscoveryExhausted) {
+    currentRreqTtl = TTL_START;
+    rreqMaxTtlCount = 0;
+    routeDiscoveryExhausted = false;
+  }
+
+  const uint8_t ttlToSend = currentRreqTtl;
+  if (ttlToSend == NET_DIAMETER) ++rreqMaxTtlCount;
+
+  const uint8_t energy = USE_EA_AODV ? txGetResidualEnergyPercent() : 100;
+  ++rreqId;
+  ++countRouteDiscoveries;
   String frame = "RREQ|" + String(NODE_ID) + "|" + String(BASE_ID) + "|" +
                  String(rreqId) + "|" + String(NODE_ID) + "|0|" + String(energy) + "|" +
-                 String(NODE_ID) + "|" + String(currentRreqTtl);
-  currentRreqTtl = RREQ_RING_MAX_TTL;
-  routeDiscoveryInProgress = true; lastRreqAt = millis(); routeDiscoveryStartedAt = lastRreqAt;
-  unsigned long backoff = RREQ_RETRY_INTERVAL << (rreqRetryCount > 2 ? 2 : rreqRetryCount);
-  if (backoff > RREQ_MAX_BACKOFF) backoff = RREQ_MAX_BACKOFF;
-  nextRreqRetryAt = lastRreqAt + backoff;
-  Serial.print("[RREQ] Discovery TTL="); Serial.print(currentRreqTtl);
+                 String(NODE_ID) + "|" + String(ttlToSend);
+
+  routeDiscoveryInProgress = true;
+  lastRreqAt = millis();
+  routeDiscoveryStartedAt = lastRreqAt;
+  const unsigned long retryDelay = calculateRreqRetryDelayMs(ttlToSend);
+  nextRreqRetryAt = lastRreqAt + retryDelay;
+
+  Serial.print("[RREQ] TTL="); Serial.print(ttlToSend);
+  Serial.print(" retry_timer_ms="); Serial.print(retryDelay);
+  Serial.print(" maxTTL_attempt="); Serial.print(rreqMaxTtlCount);
   Serial.print(" request#"); Serial.println(rreqId);
   transmitFrame(frame);
 }
@@ -327,7 +366,7 @@ void handleRrep(String f[], uint8_t n) {
   }
 
   if (String(NODE_ID) == origin) {
-    routeDiscoveryInProgress = false; currentRreqTtl = RREQ_RING_MAX_TTL; rreqRetryCount = 0;
+    routeDiscoveryInProgress = false; currentRreqTtl = TTL_START; rreqMaxTtlCount = 0; routeDiscoveryExhausted = false;
     uint32_t discoveryMs = (uint32_t)(millis() - routeDiscoveryStartedAt);
     countRouteDiscoveryCompleted++; totalRouteDiscoveryMs += discoveryMs;
     Serial.print("[METRIC,DISCOVERY_TX] duration_ms="); Serial.println(discoveryMs);
@@ -379,10 +418,10 @@ void checkBattery() {
 }
 
 unsigned long calculateAckTimeoutMs(const String& path) {
-  uint8_t nodes = pathCount(path);
-  uint8_t hops = (nodes > 1) ? (uint8_t)(nodes - 1) : 1;
-  unsigned long timeout = ACK_TIMEOUT_BASE_MS + (unsigned long)hops * ACK_TIMEOUT_PER_HOP_MS;
-  return (timeout > ACK_TIMEOUT_MAX_MS) ? ACK_TIMEOUT_MAX_MS : timeout;
+  // ACK end-to-end DATA merupakan ekstensi proyek, bukan AODV ACK.
+  // Gunakan nilai NetTraversalTime original sebagai batas tunggu.
+  (void)path;
+  return DATA_ACK_TIMEOUT_MS;
 }
 
 void transmitDataFrame(const String& payload, bool isRetry = false) {
@@ -553,7 +592,9 @@ void handleRerr(String f[], uint8_t n) {
     invalidateRoutesByPath(brokenPath);
     if (destination == String(BASE_ID)) {
       routeDiscoveryInProgress = false;
-      currentRreqTtl = RREQ_RING_MAX_TTL;
+      currentRreqTtl = TTL_START;
+      rreqMaxTtlCount = 0;
+      routeDiscoveryExhausted = false;
       nextRreqRetryAt = millis();
     }
   }
@@ -594,9 +635,6 @@ void pollRadio() {
 
 // ================================ APP API =================================
 void routerBegin() {
-  globalBootId = esp_random();
-  Serial.print("[BOOT] Boot Session ID (boot_id): 0x");
-  Serial.println(globalBootId, HEX);
   Serial.begin(115200);
   randomSeed((uint32_t)micros() ^ (uint32_t)analogRead(34));
   delay(500);
@@ -618,28 +656,12 @@ void routerBegin() {
     }
   }
 
-  // Discovery awal memakai TTL maksimum; interval telemetry tidak berubah.
+  // Discovery awal mengikuti expanding-ring AODV original (TTL 1, lalu 3, 5, 7, 35).
   sendRouteRequest();
   Serial.println("[INIT] LoRa siap.");
 }
 
 void routerUpdate() {
-  // ================= SOFTWARE CUT-OFF (AUTO DEEP-SLEEP) =================
-  // Jika tegangan baterai 2S sudah <= 6.40V (0%), hentikan semua transmisi/SOS
-  // dan masuk deep-sleep agar tidak mengirim saat baterai kritis meski Step-Down masih 5V.
-  if (txIsInaAvailable()) {
-    float vBatt = txGetBatteryVoltage();
-    if (vBatt > 0.0f && txCalculateResidualEnergyPercent(vBatt) == 0) {
-      Serial.print("[POWER] Tegangan kritis (");
-      Serial.print(vBatt, 2);
-      Serial.println(" V / 0%). Mematikan transmisi & masuk Deep-Sleep...");
-      digitalWrite(LED_RED, HIGH);
-      delay(1500);
-      digitalWrite(LED_RED, LOW);
-      esp_deep_sleep_start();
-    }
-  }
-
   unsigned long now = millis();
   pollRadio();
   processTxQueue();
@@ -683,20 +705,27 @@ void routerUpdate() {
     if (lastSentPath.length()) sendRouteError(lastSentPath, ackExpectedSeq);
     invalidateRoute(String(BASE_ID));
     routeDiscoveryInProgress = false;
-    currentRreqTtl = RREQ_RING_MAX_TTL;
-    rreqRetryCount = min((int)rreqRetryCount + 1, 4);
+    currentRreqTtl = TTL_START;
+    rreqMaxTtlCount = 0;
+    routeDiscoveryExhausted = false;
     nextRreqRetryAt = now;
   }
 
   if (findRouteIndex(String(BASE_ID), false) < 0 &&
-      (long)(now - nextRreqRetryAt) >= 0) {
+      !routeDiscoveryExhausted && (long)(now - nextRreqRetryAt) >= 0) {
     if (routeDiscoveryInProgress) {
       routeDiscoveryInProgress = false;
-      rreqRetryCount = min((int)rreqRetryCount + 1, 4);
-      countRouteFailures++;
-      Serial.println("[RREQ] Discovery timeout; retrying with maximum TTL.");
+      if (currentRreqTtl < NET_DIAMETER) {
+        const uint16_t nextTtl = (uint16_t)currentRreqTtl + TTL_INCREMENT;
+        currentRreqTtl = (nextTtl > TTL_THRESHOLD) ? NET_DIAMETER : (uint8_t)nextTtl;
+        Serial.print("[RREQ] Ring timeout; next TTL="); Serial.println(currentRreqTtl);
+      } else if (rreqMaxTtlCount >= RREQ_RETRIES) {
+        routeDiscoveryExhausted = true;
+        ++countRouteFailures;
+        Serial.println("[RREQ] Discovery failed after RreqRetries at NetDiameter.");
+      }
     }
-    if (!routeDiscoveryInProgress) sendRouteRequest();
+    if (!routeDiscoveryInProgress && !routeDiscoveryExhausted) sendRouteRequest();
   }
 
   if (pendingDataValid && !waitingAck && !routeDiscoveryInProgress &&
