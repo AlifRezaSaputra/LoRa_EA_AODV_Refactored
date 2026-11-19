@@ -475,6 +475,8 @@ void handlePacket(const String& packet) {
   handleData(f, n);
 }
 
+
+
 void pollRadio() {
   String packet;
   int state = HW_RADIO_OK;
@@ -487,6 +489,7 @@ void pollRadio() {
     countCrcErr++;
   }
 }
+
 
 // ================================ APP API =================================
 void routerBegin() {
