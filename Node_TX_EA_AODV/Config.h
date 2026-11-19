@@ -4,17 +4,13 @@
 #include <Arduino.h>
 
 // ======================== PER-DEVICE CONFIGURATION ========================
-// Ganti NODE_ID agar unik pada setiap node SOURCE + RELAY ("NODE01", "NODE02", dst).
+// Ganti NODE_ID agar unik pada setiap node SOURCE + RELAY.
 static const char NODE_ID[] = "NODE01";
 static const char BASE_ID[] = "BASE";
 
 // true: EA-AODV (max-min residual energy, lalu hop terkecil)
 // false: AODV (hop terkecil). Nilai harus sama di seluruh jaringan.
 static const bool USE_EA_AODV = true;
-
-// Boot session token 32-bit (probabilistic global uniqueness generated once via esp_random())
-extern uint32_t globalBootId;
-
 
 // ============================== PIN CONFIG ================================
 #define GPS_RX 16
@@ -41,28 +37,56 @@ static const uint8_t LORA_SYNCWORD = 0x12;
 static const int8_t LORA_POWER = 10;
 static const uint16_t LORA_PREAMBLE = 8;
 
-// ============================== TIMEOUTS ==================================
-static const unsigned long SEND_INTERVAL = 5000;
-static const unsigned long LED_DURATION = 3000;
-static const unsigned long ACK_TIMEOUT_BASE_MS = 1800;
-static const unsigned long ACK_TIMEOUT_PER_HOP_MS = 750;
-static const unsigned long ACK_TIMEOUT_MAX_MS = 7000;
-static const unsigned long ROUTE_LIFETIME = 60000;
-static const unsigned long RREQ_RETRY_INTERVAL = 6000;
-static const unsigned long RREQ_MAX_BACKOFF = 24000;
-static const unsigned long FORWARD_JITTER_MAX_MS = 120;
-static const unsigned long RREQ_FORWARD_MIN_INTERVAL = 30;
-static const unsigned long HELLO_INTERVAL = 60000;
-static const unsigned long NEIGHBOR_TIMEOUT = 180000;
-static const uint8_t RREQ_INITIAL_TTL = 6;
-static const uint8_t RREQ_RING_MAX_TTL = 6;
-static const unsigned long RREQ_SEEN_LIFETIME = 30000;
+// ======================= AODV ORIGINAL DEFAULT TIMERS =====================
+// Nilai mengikuti default ns-3 AODV. Perhitungan retry RREQ dilakukan
+// berdasarkan TTL dan NetTraversalTime di Router.cpp.
+static const uint32_t NODE_TRAVERSAL_TIME_MS = 40UL;
+static const uint8_t NET_DIAMETER = 35;
+static const uint8_t TTL_START = 1;
+static const uint8_t TTL_INCREMENT = 2;
+static const uint8_t TTL_THRESHOLD = 7;
+static const uint8_t TIMEOUT_BUFFER = 2;
+static const uint8_t RREQ_RETRIES = 2;
+static const uint16_t RREQ_RATE_LIMIT = 10;
+static const uint16_t RERR_RATE_LIMIT = 10;
+static const uint32_t ACTIVE_ROUTE_TIMEOUT_MS = 3000UL;
+static const uint32_t HELLO_INTERVAL_MS = 1000UL;
+static const uint8_t ALLOWED_HELLO_LOSS = 2;
+static const uint32_t NET_TRAVERSAL_TIME_MS = 2UL * NODE_TRAVERSAL_TIME_MS * NET_DIAMETER;
+static const uint32_t PATH_DISCOVERY_TIME_MS = 2UL * NET_TRAVERSAL_TIME_MS;
+static const uint32_t MY_ROUTE_TIMEOUT_MS = 2UL * ((PATH_DISCOVERY_TIME_MS > ACTIVE_ROUTE_TIMEOUT_MS)
+                                                        ? PATH_DISCOVERY_TIME_MS
+                                                        : ACTIVE_ROUTE_TIMEOUT_MS);
+static const uint32_t NEXT_HOP_WAIT_MS = NODE_TRAVERSAL_TIME_MS + 10UL;
+static const uint32_t BLACKLIST_TIMEOUT_MS = RREQ_RETRIES * NET_TRAVERSAL_TIME_MS;
+static const uint32_t DELETE_PERIOD_MS = 5UL * ((ACTIVE_ROUTE_TIMEOUT_MS > HELLO_INTERVAL_MS)
+                                                     ? ACTIVE_ROUTE_TIMEOUT_MS
+                                                     : HELLO_INTERVAL_MS);
+static const uint32_t MAX_QUEUE_TIME_MS = 30000UL;
+static const uint32_t NEIGHBOR_TIMEOUT_MS = ALLOWED_HELLO_LOSS * HELLO_INTERVAL_MS;
+
+// Nilai yang digunakan langsung oleh sketch.
+static const uint8_t RREQ_INITIAL_TTL = TTL_START;
+static const uint8_t RREQ_RING_MAX_TTL = NET_DIAMETER;
+static const uint32_t RREQ_SEEN_LIFETIME = PATH_DISCOVERY_TIME_MS;
+static const uint32_t HELLO_INTERVAL = HELLO_INTERVAL_MS;
+static const uint32_t NEIGHBOR_TIMEOUT = NEIGHBOR_TIMEOUT_MS;
+static const uint8_t MAX_ROUTE_TTL = NET_DIAMETER;
+
+// Timer aplikasi/perangkat keras yang bukan timer AODV.
+static const unsigned long SEND_INTERVAL = 5000UL;
+static const unsigned long LED_DURATION = 3000UL;
+
+// ACK DATA end-to-end adalah ekstensi aplikasi, bukan timer AODV.
+// Dipakai NetTraversalTime sebagai batas tunggu konservatif tanpa angka baru.
+static const uint32_t DATA_ACK_TIMEOUT_MS = NET_TRAVERSAL_TIME_MS;
+static const unsigned long FORWARD_JITTER_MAX_MS = 10UL; // AODV: random 0..10 ms
+static const unsigned long RREQ_FORWARD_MIN_INTERVAL = 0UL;
 static const float BATT_LOW_THRESHOLD = 20.0;
 static const unsigned long BATT_CHECK_INTERVAL = 10000;
 
 // ================================= LIMITS ==================================
-static const uint8_t MAX_ROUTE_TTL = 6;
-static const uint8_t MAX_ROUTE_HOPS = 6;
+static const uint8_t MAX_ROUTE_HOPS = NET_DIAMETER;
 static const uint8_t MAX_ROUTE_ENTRIES = 16;
 static const uint8_t MAX_SEEN_RREQ = 48;
 static const uint8_t MAX_SEEN_RERR = 16;
@@ -70,7 +94,7 @@ static const uint8_t MAX_TX_QUEUE = 24;
 static const uint8_t MAX_FIELDS = 16;
 
 // ======================== INA219 / 2S BATTERY ==============================
-static const float BATTERY_CAPACITY_AH = 3.0f; // Baterai 2S 3.7V 3000mAh
+static const float BATTERY_CAPACITY_AH = 2.2f;
 static const float BATTERY_FULL_VOLTAGE = 8.40f;
 static const float BATTERY_EMPTY_EST_VOLTAGE = 6.40f;
 static const float BATTERY_LOW_WARNING_PERCENT = 20.0f;
