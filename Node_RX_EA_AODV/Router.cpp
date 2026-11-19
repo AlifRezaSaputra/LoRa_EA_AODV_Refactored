@@ -466,24 +466,41 @@ void handlePacket(const String& packet) {
   handleData(f, n);
 }
 
+
 void pollRadio() {
   String packet;
-  int radioState;
+  int radioState = HW_RADIO_OK;
 
-  float rssiDbm = 0.0;
-  float snrDb = 0.0;
+  float rssiDbm = 0.0f;
+  float snrDb = 0.0f;
 
-  if (rxPollRadio(packet, radioState, rssiDbm, snrDb)) {
+  if (!rxPollRadio(packet, radioState, rssiDbm, snrDb)) {
+    return;
+  }
 
-    if (radioState == HW_RADIO_OK) {
-      Serial.print("[RADIO] RSSI: ");
-      Serial.print(rssiDbm);
-      Serial.print(" dBm | SNR: ");
-      Serial.print(snrDb);
-      Serial.println(" dB");
+  if (radioState == HW_RADIO_OK && packet.length() > 0) {
+    lastRxActivity = millis();
 
-      // Lanjutkan proses packet seperti sebelumnya.
-    }
+    Serial.print("[RADIO] RSSI: ");
+    Serial.print(rssiDbm);
+    Serial.print(" dBm | SNR: ");
+    Serial.print(snrDb);
+    Serial.println(" dB");
+
+    Serial.print("[RX] Paket diterima: ");
+    Serial.println(packet);
+
+    rxLedPulse();
+
+    // INI BAGIAN YANG SEBELUMNYA HILANG
+    handlePacket(packet);
+
+  } else if (radioState == HW_RADIO_CRC_MISMATCH) {
+    countCrcErr++;
+    Serial.println("[RADIO] CRC mismatch; paket diabaikan.");
+
+  } else {
+    Serial.println("[RADIO] Kesalahan saat membaca paket.");
   }
 }
 
