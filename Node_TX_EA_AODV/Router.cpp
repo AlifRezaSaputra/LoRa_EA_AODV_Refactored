@@ -477,9 +477,7 @@ void transmitDataFrame(const String& payload, bool isRetry = false) {
       pendingDataValid = false;
       pendingDataPayload = "";
     }
-  } else {
-    txLedRedOn();
-  }
+  } else 
 }
 
 void sendDataPayload(const String& payload) { transmitDataFrame(payload, true); }
@@ -548,9 +546,9 @@ void handleAck(String f[], uint8_t n) {
     if (src != String(BASE_ID)) return;
     if (waitingAck && seq == ackExpectedSeq) {
       Serial.print("[ACK] Diterima dari basecamp, seq#"); Serial.println(seq);
-      if (waitingSOSAck) {
-        txLedGreenOn();
-        Serial.println("[ACK] SOS dikonfirmasi basecamp!");
+       if (waitingSOSAck) {
+        txLedGreenTripleBlink();
+        Serial.println("[ACK] SOS sampai di basecamp!");
       }
       totalAckRttMs += (uint32_t)(millis() - ackWaitStart); countAckSuccess++;
       waitingAck = false;
@@ -678,7 +676,7 @@ void routerUpdate() {
     countAckTimeout++;
     Serial.print("[ACK] Timeout #"); Serial.print(countAckTimeout);
     Serial.print(" after "); Serial.print(currentAckTimeoutMs); Serial.println(" ms; route invalidated.");
-    if (waitingSOSAck) txLedRedOn();
+    if (waitingSOSAck) txLedRedBlink();
     waitingAck = false;
     waitingSOSAck = false;
 
