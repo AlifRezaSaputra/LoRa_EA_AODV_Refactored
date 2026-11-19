@@ -64,7 +64,12 @@ int rxTransmitFrame(const String& frame) {
   return HW_RADIO_OK;
 }
 
-bool rxPollRadio(String& packet, int& radioState) {
+bool rxPollRadio(
+  String& packet,
+  int& radioState,
+  float& rssiDbm,
+  float& snrDb
+) {
   if (!rxFlag) return false;
 
   noInterrupts();
@@ -72,9 +77,21 @@ bool rxPollRadio(String& packet, int& radioState) {
   interrupts();
 
   const int rawState = radio.readData(packet);
-  if (rawState == RADIOLIB_ERR_NONE) radioState = HW_RADIO_OK;
-  else if (rawState == RADIOLIB_ERR_CRC_MISMATCH) radioState = HW_RADIO_CRC_MISMATCH;
-  else radioState = HW_RADIO_ERROR;
+
+  // Ambil metrik radio sebelum kembali ke receive mode.
+  rssiDbm = radio.getRSSI();
+  snrDb = radio.getSNR();
+
+  if (rawState == RADIOLIB_ERR_NONE) {
+    radioState = HW_RADIO_OK;
+  }
+  else if (rawState == RADIOLIB_ERR_CRC_MISMATCH) {
+    radioState = HW_RADIO_CRC_MISMATCH;
+  }
+  else {
+    radioState = HW_RADIO_ERROR;
+  }
+
   startRadioReceive();
   return true;
 }

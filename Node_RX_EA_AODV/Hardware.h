@@ -12,7 +12,12 @@ enum HardwareRadioStatus {
 // Seluruh akses fisik Basecamp berada di modul ini.
 bool rxHardwareBegin();
 int rxTransmitFrame(const String& frame);
-bool rxPollRadio(String& packet, int& radioState);
+bool rxPollRadio(
+  String& packet,
+  int& radioState,
+  float& rssiDbm,
+  float& snrDb
+);
 
 void rxLedPulse();
 void rxLedUpdate();

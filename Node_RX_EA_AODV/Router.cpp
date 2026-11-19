@@ -468,14 +468,22 @@ void handlePacket(const String& packet) {
 
 void pollRadio() {
   String packet;
-  int state = HW_RADIO_OK;
-  if (!rxPollRadio(packet, state)) return;
+  int radioState;
 
-  lastRxActivity = millis();
-  if (state == HW_RADIO_OK && packet.length()) {
-    handlePacket(packet);
-  } else if (state == HW_RADIO_CRC_MISMATCH) {
-    countCrcErr++;
+  float rssiDbm = 0.0;
+  float snrDb = 0.0;
+
+  if (rxPollRadio(packet, radioState, rssiDbm, snrDb)) {
+
+    if (radioState == HW_RADIO_OK) {
+      Serial.print("[RADIO] RSSI: ");
+      Serial.print(rssiDbm);
+      Serial.print(" dBm | SNR: ");
+      Serial.print(snrDb);
+      Serial.println(" dB");
+
+      // Lanjutkan proses packet seperti sebelumnya.
+    }
   }
 }
 
