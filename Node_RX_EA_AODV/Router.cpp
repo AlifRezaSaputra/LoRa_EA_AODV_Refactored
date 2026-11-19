@@ -467,19 +467,24 @@ void handlePacket(const String& packet) {
 }
 
 
+
 void pollRadio() {
   String packet;
   int radioState = HW_RADIO_OK;
 
-  float rssiDbm = 0.0f;
-  float snrDb = 0.0f;
+  float rssiDbm = 0.0;
+  float snrDb = 0.0;
 
   if (!rxPollRadio(packet, radioState, rssiDbm, snrDb)) {
     return;
   }
 
   if (radioState == HW_RADIO_OK && packet.length() > 0) {
+
     lastRxActivity = millis();
+
+    Serial.println();
+    Serial.println("[RADIO] Paket diterima!");
 
     Serial.print("[RADIO] RSSI: ");
     Serial.print(rssiDbm);
@@ -487,22 +492,23 @@ void pollRadio() {
     Serial.print(snrDb);
     Serial.println(" dB");
 
-    Serial.print("[RX] Paket diterima: ");
+    Serial.print("[RX] Payload: ");
     Serial.println(packet);
 
-    rxLedPulse();
-
-    // INI BAGIAN YANG SEBELUMNYA HILANG
+    // Proses paket berdasarkan jenisnya
     handlePacket(packet);
 
-  } else if (radioState == HW_RADIO_CRC_MISMATCH) {
+  } 
+  else if (radioState == HW_RADIO_CRC_MISMATCH) {
     countCrcErr++;
-    Serial.println("[RADIO] CRC mismatch; paket diabaikan.");
+    Serial.println("[RADIO] CRC mismatch!");
 
-  } else {
-    Serial.println("[RADIO] Kesalahan saat membaca paket.");
+  } 
+  else {
+    Serial.println("[RADIO] Kesalahan penerimaan paket.");
   }
 }
+
 
 // ================================ APP API =================================
 void routerBegin() {
