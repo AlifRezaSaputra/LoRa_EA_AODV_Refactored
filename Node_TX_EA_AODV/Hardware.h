@@ -29,4 +29,7 @@ float txGetBatteryPowerMilliWatts();
 uint8_t txCalculateResidualEnergyPercent(float voltage);
 uint8_t txGetResidualEnergyPercent();
 
+void txLedRedBlink();        
+void txLedGreenTripleBlink(); 
+
 #endif // TX_HARDWARE_H

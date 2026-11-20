@@ -18,8 +18,9 @@ namespace {
   volatile bool rxFlag = false;
   bool ledRedActive = false;
   unsigned long ledRedStart = 0;
-  bool ledGreenActive = false;
-  unsigned long ledGreenStart = 0;
+  bool ledRedBlinking = false;       
+  int ledGreenBlinkCount = 0;         
+  unsigned long lastBlinkToggle = 0;   
 
   float filteredBatteryVoltage = 0.0f;
   bool batteryVoltageInitialized = false;
@@ -57,39 +58,38 @@ namespace {
     }
   }
 }
-
 bool txHardwareBegin() {
   pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
-  digitalWrite(LED_RED, LOW);
+  
+  digitalWrite(LED_RED, HIGH);    // NYALA saat mulai inisialisasi (dikasih daya)
   digitalWrite(LED_GREEN, LOW);
 
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!ina219.begin()) {
-    Serial.println("[INIT] INA219 gagal / tidak terdeteksi!");
-    txLedRedOn();
+    Serial.println("[INIT] INA219 gagal!");
+    // Biarkan merah tetap nyala karena gagal
   } else {
     inaAvailable = true;
-    Serial.println("[INIT] INA219 siap.");
   }
 
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
-  Serial.println("[INIT] GPS NEO-7M UART2 siap (RX=16, TX=17, 9600 baud).");
-
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
+  
   int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
                           LORA_SYNCWORD, LORA_POWER, LORA_PREAMBLE);
+  
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.print("[INIT] LoRa gagal dimulai. Kode: ");
-    Serial.println(state);
-    txLedRedOn();
-    return false;
+    Serial.println("[INIT] LoRa gagal!");
+    return false; // Merah tetap nyala
   }
 
   radio.setCRC(true);
   radio.setDio0Action(onReceiveFlag, RISING);
   startRadioReceive();
+
+  digitalWrite(LED_RED, LOW); // MATI jika semua berhasil diinisialisasi
   return true;
 }
 
@@ -137,17 +137,41 @@ void txLedGreenOn() {
   ledGreenActive = true;
   ledGreenStart = millis();
 }
+void txLedRedBlink() {
+  ledRedBlinking = true;
+  lastBlinkToggle = millis();
+}
 
+void txLedGreenTripleBlink() {
+  ledRedBlinking = false; // Matikan merah jika sedang kedip
+  digitalWrite(LED_RED, LOW);
+  ledGreenBlinkCount = 3; 
+  lastBlinkToggle = millis();
+}
 void txLedUpdate() {
   const unsigned long now = millis();
 
-  if (ledRedActive && now - ledRedStart >= LED_DURATION) {
-    digitalWrite(LED_RED, LOW);
-    ledRedActive = false;
+  if (ledRedBlinking) {
+    if (now - lastBlinkToggle >= 500) {
+      digitalWrite(LED_RED, !digitalRead(LED_RED));
+      lastBlinkToggle = now;
+    }
+  } 
+  else if (ledRedActive) {
+    if (now - ledRedStart >= LED_DURATION) {
+      digitalWrite(LED_RED, LOW);
+      ledRedActive = false;
+    }
   }
-  if (ledGreenActive && now - ledGreenStart >= LED_DURATION) {
-    digitalWrite(LED_GREEN, LOW);
-    ledGreenActive = false;
+
+  if (ledGreenBlinkCount > 0) {
+    if (now - lastBlinkToggle >= 300) {
+      digitalWrite(LED_GREEN, !digitalRead(LED_GREEN));
+      if (digitalRead(LED_GREEN) == LOW) {
+        ledGreenBlinkCount--;
+      }
+      lastBlinkToggle = now;
+    }
   }
 }
 
