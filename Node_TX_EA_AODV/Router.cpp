@@ -21,6 +21,7 @@ bool routeDiscoveryExhausted = false;
 uint32_t countRreqForwarded = 0, countDataForwarded = 0, countRerrSent = 0;
 uint32_t countRouteDiscoveries = 0, countRouteFailures = 0;
 uint32_t countAckSuccess = 0; uint64_t totalAckRttMs = 0;
+bool batteryLowWarning = false;
 
 bool sosActive = false;
 bool waitingAck = false;
@@ -411,9 +412,16 @@ void checkBattery() {
   Serial.print(" mA | P: "); Serial.print(power_mW, 1);
   Serial.print(" mW | SoC estimasi: "); Serial.print(pct, 0);
   Serial.println("%");
-  if (pct < BATTERY_LOW_WARNING_PERCENT) {
+
+  bool low = pct < BATTERY_LOW_WARNING_PERCENT;
+  if (low && !batteryLowWarning) {
     Serial.println("[BATT] Baterai < 20%! Menyalakan LED merah.");
-    txLedRedOn();
+    txLedRedPersistentOn();
+    batteryLowWarning = true;
+  } else if (!low && batteryLowWarning) {
+    Serial.println("[BATT] Baterai pulih > 20%. Mematikan LED merah.");
+    txLedRedOff();
+    batteryLowWarning = false;
   }
 }
 
@@ -477,7 +485,8 @@ void transmitDataFrame(const String& payload, bool isRetry = false) {
       pendingDataValid = false;
       pendingDataPayload = "";
     }
-  } else 
+  } else {
+  }
 }
 
 void sendDataPayload(const String& payload) { transmitDataFrame(payload, true); }

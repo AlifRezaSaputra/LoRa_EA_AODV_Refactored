@@ -31,5 +31,8 @@ uint8_t txGetResidualEnergyPercent();
 
 void txLedRedBlink();        
 void txLedGreenTripleBlink(); 
+void txLedRedPersistentOn();  
+void txLedRedOff();           
+void txClearRedBlink();
 
 #endif // TX_HARDWARE_H

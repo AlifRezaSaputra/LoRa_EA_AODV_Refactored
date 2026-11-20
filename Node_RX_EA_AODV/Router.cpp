@@ -385,14 +385,25 @@ void logToServer(const String& nodeId, uint32_t seq, float lat, float lng,
   Serial.print(",battery_pct="); Serial.println(battPct, 1);
 }
 
-void sendAck(const String& destination, uint32_t seq) {
+void sendAck(const String& destination, uint32_t seq, bool isSos = false) {
   String nextHop, path;
   if (!getRoute(destination, nextHop, path)) nextHop = destination; // direct fallback
   String ack = String(BASE_ID) + "|" + destination + "|ACK|" + String(seq) + "|" +
                nextHop + "|" + String(MAX_ROUTE_TTL);
+  
   transmitFrame(ack);
+  if (isSos) {
+    // Redundansi ACK untuk SOS agar lebih handal sampai ke TX
+    delay(100); 
+    transmitFrame(ack);
+    delay(100);
+    transmitFrame(ack);
+  }
+
   Serial.print("[ACK] -> "); Serial.print(destination); Serial.print(" via ");
-  Serial.print(nextHop); Serial.print(" seq#"); Serial.println(seq);
+  Serial.print(nextHop); Serial.print(" seq#"); Serial.print(seq);
+  if (isSos) Serial.print(" (Triple)");
+  Serial.println();
 }
 
 void handleData(String f[], uint8_t n) {
@@ -405,10 +416,11 @@ void handleData(String f[], uint8_t n) {
   if (receivedPathCount > 0) updateNeighbor(pathNodeAt(f[9], receivedPathCount - 1));
   if (n >= 12 && f[10].length() && f[10] != String(NODE_ID)) return;
 
+  bool sos = f[7] == "1";
   bool firstSeen = rememberData(src, seq);
   if (!firstSeen) {
     countDuplicate++;
-    sendAck(src, seq); // ACK duplicate immediately so a lost ACK does not stall the sender.
+    sendAck(src, seq, sos); // ACK duplicate immediately
     Serial.print("[DATA] Duplikat "); Serial.print(src); Serial.print(" seq#");
     Serial.println(seq);
     return;
@@ -424,10 +436,9 @@ void handleData(String f[], uint8_t n) {
   float lng = f[4].toFloat();
   float battV = f[5].toFloat();
   float battPct = f[6].toFloat();
-  bool sos = f[7] == "1";
 
   // ACK first: don't make the sender wait for Serial/JSON output or buzzer work.
-  sendAck(src, seq);
+  sendAck(src, seq, sos);
   Serial.println(); Serial.println("=== PAKET DITERIMA ===");
   Serial.print("Dari: "); Serial.println(src);
   Serial.print("Isi paket: "); Serial.println(joinFields(f, n));
@@ -480,7 +491,9 @@ void handlePacket(const String& packet) {
 void pollRadio() {
   String packet;
   int state = HW_RADIO_OK;
-  if (!rxPollRadio(packet, state)) return;
+  float rssiDbm = 0.0f;
+  float snrDb = 0.0f;
+  if (!rxPollRadio(packet, state, rssiDbm, snrDb)) return;
 
   lastRxActivity = millis();
   if (state == HW_RADIO_OK && packet.length()) {

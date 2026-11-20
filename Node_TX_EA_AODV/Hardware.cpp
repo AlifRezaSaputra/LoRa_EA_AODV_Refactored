@@ -18,9 +18,14 @@ namespace {
   volatile bool rxFlag = false;
   bool ledRedActive = false;
   unsigned long ledRedStart = 0;
-  bool ledRedBlinking = false;       
-  int ledGreenBlinkCount = 0;         
-  unsigned long lastBlinkToggle = 0;   
+  bool ledRedBlinking = false;
+  unsigned long ledRedBlinkStart = 0;
+  bool ledRedPersistent = false;
+  bool ledGreenActive = false;
+  unsigned long ledGreenStart = 0;
+  int ledGreenBlinkCount = 0;
+  unsigned long lastRedBlinkToggle = 0;
+  unsigned long lastGreenBlinkToggle = 0;   
 
   float filteredBatteryVoltage = 0.0f;
   bool batteryVoltageInitialized = false;
@@ -128,50 +133,77 @@ bool txPollRadio(String& packet, int& radioState) {
 
 void txLedRedOn() {
   digitalWrite(LED_RED, HIGH);
-  ledRedActive = true;
-  ledRedStart = millis();
+  ledRedPersistent = true;
 }
 
 void txLedGreenOn() {
   digitalWrite(LED_GREEN, HIGH);
-  ledGreenActive = true;
-  ledGreenStart = millis();
 }
+
 void txLedRedBlink() {
   ledRedBlinking = true;
-  lastBlinkToggle = millis();
+  lastRedBlinkToggle = millis();
+}
+
+void txLedRedPersistentOn() {
+  ledRedPersistent = true;
+  ledRedBlinking = false;
+  digitalWrite(LED_RED, HIGH);
+}
+
+void txLedRedOff() {
+  ledRedPersistent = false;
+  ledRedBlinking = false;
+  digitalWrite(LED_RED, LOW);
+}
+
+void txClearRedBlink() {
+  ledRedBlinking = false;
 }
 
 void txLedGreenTripleBlink() {
-  ledRedBlinking = false; // Matikan merah jika sedang kedip
+  // SOS Berhasil: Matikan semua status error merah (blink/persistent)
+  ledRedBlinking = false;
+  ledRedPersistent = false;
   digitalWrite(LED_RED, LOW);
-  ledGreenBlinkCount = 3; 
-  lastBlinkToggle = millis();
+  
+  // Mulai blink hijau 3x
+  digitalWrite(LED_GREEN, HIGH);
+  ledGreenBlinkCount = 3;
+  lastGreenBlinkToggle = millis();
 }
+
 void txLedUpdate() {
   const unsigned long now = millis();
 
+  // Red LED Logic
   if (ledRedBlinking) {
-    if (now - lastBlinkToggle >= 500) {
-      digitalWrite(LED_RED, !digitalRead(LED_RED));
-      lastBlinkToggle = now;
+    if (now - ledRedBlinkStart >= 3000) {
+      ledRedBlinking = false;
+      if (!ledRedPersistent) digitalWrite(LED_RED, LOW);
+    } else {
+      if (now - lastRedBlinkToggle >= 500) {
+        digitalWrite(LED_RED, !digitalRead(LED_RED));
+        lastRedBlinkToggle = now;
+      }
     }
-  } 
-  else if (ledRedActive) {
-    if (now - ledRedStart >= LED_DURATION) {
-      digitalWrite(LED_RED, LOW);
-      ledRedActive = false;
-    }
+  } else if (ledRedPersistent) {
+    digitalWrite(LED_RED, HIGH);
+  } else {
+    digitalWrite(LED_RED, LOW);
   }
 
+  // Green LED Logic (ACK SOS only)
   if (ledGreenBlinkCount > 0) {
-    if (now - lastBlinkToggle >= 300) {
+    if (now - lastGreenBlinkToggle >= 300) {
       digitalWrite(LED_GREEN, !digitalRead(LED_GREEN));
       if (digitalRead(LED_GREEN) == LOW) {
         ledGreenBlinkCount--;
       }
-      lastBlinkToggle = now;
+      lastGreenBlinkToggle = now;
     }
+  } else {
+    digitalWrite(LED_GREEN, LOW);
   }
 }
 

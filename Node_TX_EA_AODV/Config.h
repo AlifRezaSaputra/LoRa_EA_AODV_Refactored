@@ -5,7 +5,7 @@
 
 // ======================== PER-DEVICE CONFIGURATION ========================
 // Ganti NODE_ID agar unik pada setiap node SOURCE + RELAY.
-static const char NODE_ID[] = "NODE01";
+static const char NODE_ID[] = "NODE02";
 static const char BASE_ID[] = "BASE";
 
 // true: EA-AODV (max-min residual energy, lalu hop terkecil)
@@ -101,3 +101,6 @@ static const float BATTERY_LOW_WARNING_PERCENT = 20.0f;
 static const float BATTERY_EMA_ALPHA = 0.15f;
 
 #endif // TX_CONFIG_H
+
+
+
