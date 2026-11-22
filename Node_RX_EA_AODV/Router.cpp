@@ -13,6 +13,7 @@ int transmitFrame(const String& frame);
 unsigned long lastStatus = 0;
 unsigned long lastRxActivity = 0;
 unsigned long lastHelloAt = 0;
+uint32_t baseSequenceNumber = 0; // AODV destination sequence owned by BASECAMP.
 
 bool sosAlertActive = false;
 unsigned long sosAlertStart = 0;
@@ -37,6 +38,8 @@ struct RouteEntry {
   String path;
   uint8_t minEnergy = 0;
   uint8_t hops = 0;
+  uint32_t destinationSequence = 0;
+  bool sequenceValid = false;
   unsigned long updatedAt = 0;
   unsigned long lifetimeMs = MY_ROUTE_TIMEOUT_MS;
 };
@@ -45,9 +48,13 @@ RouteEntry routeTable[MAX_ROUTE_ENTRIES];
 SeenEntry seenRreq[MAX_SEEN_RREQ];
 SeenEntry seenData[MAX_SEEN_DATA];
 SeenEntry seenRerr[MAX_SEEN_RERR];
-SeenEntry completedRreq[16];
+SeenEntry completedRreq[MAX_COMPLETED_RREQ];
 struct NeighborEntry { bool used=false; String id; unsigned long lastSeen=0; };
-NeighborEntry neighbors[16];
+struct BlacklistEntry { bool used=false; String id; unsigned long until=0; };
+struct PendingRrepAck { bool used=false; String neighbor; String requestId; unsigned long sentAt=0; };
+NeighborEntry neighbors[MAX_NEIGHBORS];
+BlacklistEntry blacklist[MAX_BLACKLIST_ENTRIES];
+PendingRrepAck pendingRrepAcks[MAX_PENDING_RREP_ACKS];
 
 struct RouteCandidate {
   bool used = false;
@@ -59,6 +66,8 @@ struct DiscoverySlot {
   bool used = false;
   String origin;
   String requestId;
+  uint32_t originSequence = 0;
+  uint32_t requestedDestinationSequence = 0;
   unsigned long startedAt = 0;
   RouteCandidate candidates[MAX_CANDIDATES];
 };
@@ -67,7 +76,7 @@ DiscoverySlot discoverySlots[MAX_DISCOVERY_SLOTS];
 void updateNeighbor(const String& id) {
   if (!id.length() || id == String(NODE_ID)) return;
   int freeSlot=-1, oldest=0;
-  for (uint8_t i=0;i<16;i++) {
+  for (uint8_t i=0;i<MAX_NEIGHBORS;i++) {
     if (neighbors[i].used && neighbors[i].id==id) { neighbors[i].lastSeen=millis(); return; }
     if (!neighbors[i].used && freeSlot<0) freeSlot=i;
     if (neighbors[i].lastSeen < neighbors[oldest].lastSeen) oldest=i;
@@ -75,11 +84,66 @@ void updateNeighbor(const String& id) {
   int slot=freeSlot>=0?freeSlot:oldest; neighbors[slot].used=true; neighbors[slot].id=id; neighbors[slot].lastSeen=millis();
 }
 bool neighborAlive(const String& id) {
-  for (uint8_t i=0;i<16;i++) if (neighbors[i].used && neighbors[i].id==id) return millis()-neighbors[i].lastSeen<=NEIGHBOR_TIMEOUT;
+  for (uint8_t i=0;i<MAX_NEIGHBORS;i++) if (neighbors[i].used && neighbors[i].id==id) return millis()-neighbors[i].lastSeen<=NEIGHBOR_TIMEOUT;
   return false;
+}
+
+bool isNeighborBlacklisted(const String& id) {
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < MAX_BLACKLIST_ENTRIES; ++i) {
+    if (blacklist[i].used && (long)(now - blacklist[i].until) >= 0)
+      blacklist[i].used = false;
+    if (blacklist[i].used && blacklist[i].id == id) return true;
+  }
+  return false;
+}
+
+void blacklistNeighbor(const String& id) {
+  if (!id.length()) return;
+  int slot = -1;
+  for (uint8_t i = 0; i < MAX_BLACKLIST_ENTRIES; ++i) {
+    if (blacklist[i].used && blacklist[i].id == id) { slot = i; break; }
+    if (!blacklist[i].used && slot < 0) slot = i;
+  }
+  if (slot < 0) slot = 0;
+  blacklist[slot].used = true;
+  blacklist[slot].id = id;
+  blacklist[slot].until = millis() + BLACKLIST_TIMEOUT_MS;
+  Serial.print("[AODV] Neighbor masuk blacklist: "); Serial.println(id);
+}
+
+void trackRrepAck(const String& neighbor, const String& requestId) {
+  int slot = -1;
+  for (uint8_t i = 0; i < MAX_PENDING_RREP_ACKS; ++i) {
+    if (pendingRrepAcks[i].used && pendingRrepAcks[i].neighbor == neighbor &&
+        pendingRrepAcks[i].requestId == requestId) { slot = i; break; }
+    if (!pendingRrepAcks[i].used && slot < 0) slot = i;
+  }
+  if (slot < 0) slot = 0;
+  pendingRrepAcks[slot].used = true;
+  pendingRrepAcks[slot].neighbor = neighbor;
+  pendingRrepAcks[slot].requestId = requestId;
+  pendingRrepAcks[slot].sentAt = millis();
+}
+
+void clearRrepAck(const String& neighbor, const String& requestId) {
+  for (uint8_t i = 0; i < MAX_PENDING_RREP_ACKS; ++i)
+    if (pendingRrepAcks[i].used && pendingRrepAcks[i].neighbor == neighbor &&
+        pendingRrepAcks[i].requestId == requestId) pendingRrepAcks[i].used = false;
 }
 void processNeighborMaintenance() {
   unsigned long now=millis();
+  for (uint8_t p = 0; p < MAX_PENDING_RREP_ACKS; ++p) {
+    if (pendingRrepAcks[p].used && now - pendingRrepAcks[p].sentAt >= NEXT_HOP_WAIT_MS) {
+      String failedNeighbor = pendingRrepAcks[p].neighbor;
+      pendingRrepAcks[p].used = false;
+      blacklistNeighbor(failedNeighbor);
+      for (uint8_t r = 0; r < MAX_ROUTE_ENTRIES; ++r)
+        if (routeTable[r].used && routeTable[r].nextHop == failedNeighbor)
+          routeTable[r].used = false;
+      ++countRouteFailures;
+    }
+  }
   if (now-lastHelloAt>=HELLO_INTERVAL) { lastHelloAt=now; transmitFrame(String("HELLO|")+BASE_ID); }
   for (uint8_t i=0;i<MAX_ROUTE_ENTRIES;i++) {
     if (!routeTable[i].used) continue;
@@ -123,6 +187,17 @@ uint8_t getResidualEnergyPercent() {
 }
 
 
+// RFC-style 32-bit serial-number comparison (wrap-around safe).
+bool sequenceIsNewer(uint32_t candidate, uint32_t current) {
+  return static_cast<int32_t>(candidate - current) > 0;
+}
+
+bool routeMetricIsBetter(uint8_t energy, uint8_t hops,
+                         uint8_t currentEnergy, uint8_t currentHops) {
+  if (USE_EA_AODV && energy != currentEnergy) return energy > currentEnergy;
+  return hops < currentHops;
+}
+
 // Radio facade: routing hanya mengetahui API frame, bukan objek RadioLib.
 int transmitFrame(const String& frame) {
   return rxTransmitFrame(frame);
@@ -161,19 +236,32 @@ bool getRoute(const String& destination, String& nextHop, String& path, uint8_t*
 }
 
 void installRoute(const String& destination, const String& nextHop, const String& path,
-                  uint8_t minEnergy, uint8_t hops) {
+                  uint8_t minEnergy, uint8_t hops,
+                  uint32_t destinationSequence = 0, bool sequenceValid = true) {
   if (!destination.length() || !nextHop.length() || destination == NODE_ID) return;
   int slot = findRouteIndex(destination, false);
-  if (slot < 0) {
+  if (slot >= 0) {
+    RouteEntry& old = routeTable[slot];
+    bool replace = false;
+    if (sequenceValid && old.sequenceValid) {
+      if (sequenceIsNewer(destinationSequence, old.destinationSequence)) replace = true;
+      else if (destinationSequence == old.destinationSequence)
+        replace = routeMetricIsBetter(minEnergy, hops, old.minEnergy, old.hops);
+    } else if (sequenceValid && !old.sequenceValid) {
+      replace = true;
+    } else if (!old.sequenceValid) {
+      replace = routeMetricIsBetter(minEnergy, hops, old.minEnergy, old.hops);
+    }
+    if (!replace) return;
+  } else {
     for (uint8_t i = 0; i < MAX_ROUTE_ENTRIES; ++i) {
       if (!routeTable[i].used) { slot = i; break; }
     }
   }
   if (slot < 0) {
     slot = 0;
-    for (uint8_t i = 1; i < MAX_ROUTE_ENTRIES; ++i) {
+    for (uint8_t i = 1; i < MAX_ROUTE_ENTRIES; ++i)
       if ((long)(routeTable[i].updatedAt - routeTable[slot].updatedAt) < 0) slot = i;
-    }
   }
   routeTable[slot].used = true;
   routeTable[slot].destination = destination;
@@ -181,18 +269,35 @@ void installRoute(const String& destination, const String& nextHop, const String
   routeTable[slot].path = path;
   routeTable[slot].minEnergy = minEnergy;
   routeTable[slot].hops = hops;
+  routeTable[slot].destinationSequence = destinationSequence;
+  routeTable[slot].sequenceValid = sequenceValid;
   routeTable[slot].updatedAt = millis();
   routeTable[slot].lifetimeMs = MY_ROUTE_TIMEOUT_MS;
   Serial.print("[ROUTE] "); Serial.print(NODE_ID);
   Serial.print(" -> "); Serial.print(destination);
   Serial.print(" via "); Serial.print(nextHop);
+  Serial.print(" | seq="); Serial.print(destinationSequence);
   Serial.print(" | E_min="); Serial.print(minEnergy);
   Serial.print("% | hops="); Serial.println(hops);
 }
 
-void invalidateRoutesByPath(const String& path) {
+void invalidateRoutesByPath(const String& path, const String& unreachableDestination,
+                            uint32_t errorSequence) {
   for (uint8_t i = 0; i < MAX_ROUTE_ENTRIES; ++i) {
-    if (routeTable[i].used && routeTable[i].path == path) routeTable[i].used = false;
+    RouteEntry& route = routeTable[i];
+    if (!route.used || route.path != path) continue;
+    if (route.destination == unreachableDestination && route.sequenceValid &&
+        sequenceIsNewer(route.destinationSequence, errorSequence)) continue;
+    route.used = false;
+  }
+}
+
+void invalidateRouteByError(const String& destination, uint32_t errorSequence) {
+  for (uint8_t i = 0; i < MAX_ROUTE_ENTRIES; ++i) {
+    RouteEntry& route = routeTable[i];
+    if (!route.used || route.destination != destination) continue;
+    if (route.sequenceValid && sequenceIsNewer(route.destinationSequence, errorSequence)) continue;
+    route.used = false;
   }
 }
 
@@ -239,6 +344,8 @@ int allocateDiscoverySlot(const String& origin, const String& requestId) {
       discoverySlots[i].used = true;
       discoverySlots[i].origin = origin;
       discoverySlots[i].requestId = requestId;
+      discoverySlots[i].originSequence = 0;
+      discoverySlots[i].requestedDestinationSequence = 0;
       discoverySlots[i].startedAt = millis();
       for (uint8_t j = 0; j < MAX_CANDIDATES; ++j) discoverySlots[i].candidates[j].used = false;
       return i;
@@ -251,16 +358,25 @@ int allocateDiscoverySlot(const String& origin, const String& requestId) {
   discoverySlots[oldest].used = true;
   discoverySlots[oldest].origin = origin;
   discoverySlots[oldest].requestId = requestId;
+  discoverySlots[oldest].originSequence = 0;
+  discoverySlots[oldest].requestedDestinationSequence = 0;
   discoverySlots[oldest].startedAt = millis();
   for (uint8_t j = 0; j < MAX_CANDIDATES; ++j) discoverySlots[oldest].candidates[j].used = false;
   return oldest;
 }
 
 void addRouteCandidate(const String& origin, const String& requestId, const String& candidatePath,
-                       uint8_t minEnergy, uint8_t hops) {
+                       uint8_t minEnergy, uint8_t hops,
+                       uint32_t originSequence, uint32_t requestedDestinationSequence) {
   int slot = findDiscoverySlot(origin, requestId);
   if (slot < 0) slot = allocateDiscoverySlot(origin, requestId);
-  DiscoverySlot& d = discoverySlots[slot]; countRouteCandidatesSeen++;
+  DiscoverySlot& d = discoverySlots[slot];
+  if (d.originSequence && originSequence && d.originSequence != originSequence) return;
+  if (!d.originSequence) d.originSequence = originSequence;
+  if (!d.requestedDestinationSequence ||
+      sequenceIsNewer(requestedDestinationSequence, d.requestedDestinationSequence))
+    d.requestedDestinationSequence = requestedDestinationSequence;
+  countRouteCandidatesSeen++;
   int cslot = -1;
   for (uint8_t i=0;i<MAX_CANDIDATES;i++) {
     if (d.candidates[i].used && d.candidates[i].path == candidatePath) { cslot=i; break; }
@@ -286,14 +402,24 @@ void addRouteCandidate(const String& origin, const String& requestId, const Stri
 }
 
 void sendRouteReply(const String& origin, const String& requestId, const String& path,
-                    uint8_t energy, uint8_t hops) {
+                    uint8_t energy, uint8_t hops,
+                    uint32_t originSequence, uint32_t requestedDestinationSequence) {
   uint8_t n = pathCount(path);
-  if (n < 2) return;
+  if (n < 2 || pathNodeAt(path, n - 1) != String(BASE_ID)) return;
+
+  // Destination sequence must be newer than the sequence requested by origin.
+  if (!sequenceIsNewer(baseSequenceNumber, requestedDestinationSequence))
+    baseSequenceNumber = requestedDestinationSequence + 1;
+  else
+    ++baseSequenceNumber;
+
   String previousHop = pathNodeAt(path, n - 2);
-  installRoute(origin, previousHop, path, energy, hops);
+  installRoute(origin, previousHop, path, energy, hops, originSequence, true);
   updateNeighbor(previousHop);
   String frame = "RREP|" + origin + "|" + String(BASE_ID) + "|" + requestId + "|" +
-                 path + "|" + String(n - 2) + "|" + String(energy) + "|" + String(MAX_ROUTE_TTL);
+                 path + "|" + String(n - 2) + "|" + String(energy) + "|" +
+                 String(MAX_ROUTE_TTL) + "|" + String(baseSequenceNumber) + "|" +
+                 String(originSequence) + "|1";
   countRrep++;
   Serial.print("[RREP] Jalur terpilih: "); Serial.print(path);
   if (USE_EA_AODV) {
@@ -302,7 +428,8 @@ void sendRouteReply(const String& origin, const String& requestId, const String&
   } else {
     Serial.print(" | metric=AODV hop-count | hops="); Serial.println(hops);
   }
-  transmitFrame(frame);
+  if (transmitFrame(frame) == HW_RADIO_OK)
+    trackRrepAck(previousHop, requestId);
 }
 
 void processDiscoveryWindows() {
@@ -325,15 +452,28 @@ void processDiscoveryWindows() {
       countRouteDiscoveryDurationMs += (uint32_t)(now - d.startedAt);
       // Transmit RREP before diagnostic Serial output to minimize control-plane delay.
       sendRouteReply(d.origin, d.requestId, d.candidates[best].path,
-                     d.candidates[best].minEnergy, d.candidates[best].hops);
+                     d.candidates[best].minEnergy, d.candidates[best].hops,
+                     d.originSequence, d.requestedDestinationSequence);
       Serial.print("[METRIC,DISCOVERY] origin="); Serial.print(d.origin);
       Serial.print(",request="); Serial.print(d.requestId);
       Serial.print(",duration_ms="); Serial.println(now - d.startedAt);
     }
     if (best < 0) countRouteDiscoveryEmpty++;
-    rememberKey(completedRreq, 16, d.origin + "|" + d.requestId, RREQ_SEEN_LIFETIME);
+    rememberKey(completedRreq, MAX_COMPLETED_RREQ, d.origin + "|" + d.requestId, RREQ_SEEN_LIFETIME);
     d.used = false;
   }
+}
+
+bool isSimplePath(const String& path, uint8_t maxNodes) {
+  uint8_t count = pathCount(path);
+  if (count == 0 || count > maxNodes) return false;
+  for (uint8_t i = 0; i < count; ++i) {
+    String a = pathNodeAt(path, i);
+    if (!a.length()) return false;
+    for (uint8_t j = 0; j < i; ++j)
+      if (a == pathNodeAt(path, j)) return false;
+  }
+  return true;
 }
 
 void handleRreq(String f[], uint8_t n) {
@@ -343,11 +483,17 @@ void handleRreq(String f[], uint8_t n) {
   uint8_t hops = (uint8_t)constrain(f[5].toInt(), 0, 255);
   uint8_t energy = (uint8_t)constrain(f[6].toInt(), 0, 100);
   String path = f[7];
+  uint32_t originSequence = (n >= 10) ? (uint32_t)f[9].toInt() : 0;
+  uint32_t requestedDestinationSequence = (n >= 11) ? (uint32_t)f[10].toInt() : 0;
 
   if (origin == NODE_ID || !origin.length() || destination != String(NODE_ID)) return;
+  if (!isSimplePath(path, MAX_ROUTE_HOPS + 1) ||
+      pathCount(path) != (uint8_t)(hops + 1) ||
+      pathNodeAt(path, pathCount(path) - 1) != f[4]) return;
+  if (isNeighborBlacklisted(f[4])) return;
   updateNeighbor(f[4]);
   if (pathContains(path, String(NODE_ID))) return;
-  if (hasFreshKey(completedRreq, 16, origin + "|" + requestId, RREQ_SEEN_LIFETIME)) return;
+  if (hasFreshKey(completedRreq, MAX_COMPLETED_RREQ, origin + "|" + requestId, RREQ_SEEN_LIFETIME)) return;
 
   String seenKey = origin + "|" + requestId + "|" + path;
   // Exact duplicate paths are filtered; distinct paths remain eligible for Top-K ranking.
@@ -357,13 +503,14 @@ void handleRreq(String f[], uint8_t n) {
   String finalPath = appendPath(path, String(NODE_ID));
   uint8_t finalHops = (uint8_t)min(255, (int)hops + 1);
   countRreq++;
-  addRouteCandidate(origin, requestId, finalPath, pathEnergy, finalHops);
+  addRouteCandidate(origin, requestId, finalPath, pathEnergy, finalHops,
+                    originSequence, requestedDestinationSequence);
 }
 
 
 // ============================ DATA HANDLING ==============================
 bool rememberData(const String& src, uint32_t seq) {
-  return rememberKey(seenData, MAX_SEEN_DATA, src + "|" + String(seq), 120000UL);
+  return rememberKey(seenData, MAX_SEEN_DATA, src + "|" + String(seq), SEEN_DATA_LIFETIME_MS);
 }
 
 void logToServer(const String& nodeId, uint32_t seq, float lat, float lng,
@@ -385,14 +532,25 @@ void logToServer(const String& nodeId, uint32_t seq, float lat, float lng,
   Serial.print(",battery_pct="); Serial.println(battPct, 1);
 }
 
-void sendAck(const String& destination, uint32_t seq) {
+void sendAck(const String& destination, uint32_t seq, bool isSos = false) {
   String nextHop, path;
   if (!getRoute(destination, nextHop, path)) nextHop = destination; // direct fallback
   String ack = String(BASE_ID) + "|" + destination + "|ACK|" + String(seq) + "|" +
                nextHop + "|" + String(MAX_ROUTE_TTL);
+  
   transmitFrame(ack);
+  if (isSos) {
+    // Redundansi ACK untuk SOS agar lebih handal sampai ke TX
+    delay(100); 
+    transmitFrame(ack);
+    delay(100);
+    transmitFrame(ack);
+  }
+
   Serial.print("[ACK] -> "); Serial.print(destination); Serial.print(" via ");
-  Serial.print(nextHop); Serial.print(" seq#"); Serial.println(seq);
+  Serial.print(nextHop); Serial.print(" seq#"); Serial.print(seq);
+  if (isSos) Serial.print(" (Triple)");
+  Serial.println();
 }
 
 void handleData(String f[], uint8_t n) {
@@ -405,10 +563,11 @@ void handleData(String f[], uint8_t n) {
   if (receivedPathCount > 0) updateNeighbor(pathNodeAt(f[9], receivedPathCount - 1));
   if (n >= 12 && f[10].length() && f[10] != String(NODE_ID)) return;
 
+  bool sos = f[7] == "1";
   bool firstSeen = rememberData(src, seq);
   if (!firstSeen) {
     countDuplicate++;
-    sendAck(src, seq); // ACK duplicate immediately so a lost ACK does not stall the sender.
+    sendAck(src, seq, sos); // ACK duplicate immediately
     Serial.print("[DATA] Duplikat "); Serial.print(src); Serial.print(" seq#");
     Serial.println(seq);
     return;
@@ -424,10 +583,9 @@ void handleData(String f[], uint8_t n) {
   float lng = f[4].toFloat();
   float battV = f[5].toFloat();
   float battPct = f[6].toFloat();
-  bool sos = f[7] == "1";
 
   // ACK first: don't make the sender wait for Serial/JSON output or buzzer work.
-  sendAck(src, seq);
+  sendAck(src, seq, sos);
   Serial.println(); Serial.println("=== PAKET DITERIMA ===");
   Serial.print("Dari: "); Serial.println(src);
   Serial.print("Isi paket: "); Serial.println(joinFields(f, n));
@@ -445,19 +603,43 @@ void handleData(String f[], uint8_t n) {
 }
 
 // ================================= RERR ===================================
+bool rerrTargetsBase(const String& recipients) {
+  if (recipients.indexOf('>') >= 0) return pathContains(recipients, String(NODE_ID));
+  int start = 0;
+  while (start < (int)recipients.length()) {
+    int end = recipients.indexOf(',', start);
+    if (end < 0) end = recipients.length();
+    if (recipients.substring(start, end) == String(NODE_ID)) return true;
+    start = end + 1;
+  }
+  return false;
+}
+
 void handleRerr(String f[], uint8_t n) {
-  // RERR|reporter|destination|brokenPath|seq|ttl
+  // RERR|reporter|destination|brokenPath|destinationSeq|ttl|precursorList
   if (n < 6) return;
   String reporter = f[1], destination = f[2], brokenPath = f[3];
   uint32_t seq = (uint32_t)f[4].toInt();
+  String recipients = (n >= 7) ? f[6] : brokenPath;
   String key = reporter + "|" + destination + "|" + brokenPath + "|" + String(seq);
   if (!rememberKey(seenRerr, MAX_SEEN_RERR, key, RREQ_SEEN_LIFETIME)) return;
-  if (pathContains(brokenPath, String(NODE_ID))) {
-    invalidateRoutesByPath(brokenPath);
+  if (rerrTargetsBase(recipients)) {
+    invalidateRoutesByPath(brokenPath, destination, seq);
+    invalidateRouteByError(destination, seq);
+    if (destination == String(BASE_ID) &&
+        (baseSequenceNumber == 0 || sequenceIsNewer(seq, baseSequenceNumber) || seq == baseSequenceNumber))
+      baseSequenceNumber = seq;
     countRerr++;
     Serial.print("[RERR] Rute terdampak dihapus: ");
     Serial.println(brokenPath);
   }
+}
+
+void handleRrepAck(String f[], uint8_t n) {
+  // RREP_ACK|sender|receiver|requestId
+  if (n < 4 || f[2] != String(NODE_ID)) return;
+  clearRrepAck(f[1], f[3]);
+  updateNeighbor(f[1]);
 }
 
 // ============================ PACKET DISPATCH =============================
@@ -470,15 +652,20 @@ void handlePacket(const String& packet) {
   if (f[0] == "HELLO" && n >= 2) { updateNeighbor(f[1]); lastRxActivity = millis(); return; }
   if (f[0] == "RREQ") { handleRreq(f, n); return; }
   if (f[0] == "RERR") { handleRerr(f, n); return; }
+  if (f[0] == "RREP_ACK") { handleRrepAck(f, n); return; }
   if (f[0] == "RREP") return;  
   if (n >= 4 && f[2] == "ACK") return;  
   handleData(f, n);
 }
 
+
+
 void pollRadio() {
   String packet;
   int state = HW_RADIO_OK;
-  if (!rxPollRadio(packet, state)) return;
+  float rssiDbm = 0.0f;
+  float snrDb = 0.0f;
+  if (!rxPollRadio(packet, state, rssiDbm, snrDb)) return;
 
   lastRxActivity = millis();
   if (state == HW_RADIO_OK && packet.length()) {
@@ -487,6 +674,7 @@ void pollRadio() {
     countCrcErr++;
   }
 }
+
 
 // ================================ APP API =================================
 void routerBegin() {

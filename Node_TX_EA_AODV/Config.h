@@ -5,7 +5,7 @@
 
 // ======================== PER-DEVICE CONFIGURATION ========================
 // Ganti NODE_ID agar unik pada setiap node SOURCE + RELAY.
-static const char NODE_ID[] = "NODE01";
+static const char NODE_ID[] = "NODE02";
 static const char BASE_ID[] = "BASE";
 
 // true: EA-AODV (max-min residual energy, lalu hop terkecil)
@@ -57,7 +57,8 @@ static const uint32_t PATH_DISCOVERY_TIME_MS = 2UL * NET_TRAVERSAL_TIME_MS;
 static const uint32_t MY_ROUTE_TIMEOUT_MS = 2UL * ((PATH_DISCOVERY_TIME_MS > ACTIVE_ROUTE_TIMEOUT_MS)
                                                         ? PATH_DISCOVERY_TIME_MS
                                                         : ACTIVE_ROUTE_TIMEOUT_MS);
-static const uint32_t NEXT_HOP_WAIT_MS = NODE_TRAVERSAL_TIME_MS + 10UL;
+// LoRa airtime/turnaround is longer than ns-3 Wi-Fi; allow a bounded RREP-ACK round trip.
+static const uint32_t NEXT_HOP_WAIT_MS = 250UL;
 static const uint32_t BLACKLIST_TIMEOUT_MS = RREQ_RETRIES * NET_TRAVERSAL_TIME_MS;
 static const uint32_t DELETE_PERIOD_MS = 5UL * ((ACTIVE_ROUTE_TIMEOUT_MS > HELLO_INTERVAL_MS)
                                                      ? ACTIVE_ROUTE_TIMEOUT_MS
@@ -85,12 +86,30 @@ static const unsigned long RREQ_FORWARD_MIN_INTERVAL = 0UL;
 static const float BATT_LOW_THRESHOLD = 20.0;
 static const unsigned long BATT_CHECK_INTERVAL = 10000;
 
+// ======================= ROUTING TUNING LIMITS ============================
+// Nilai default sama dengan kapasitas hard-coded pada Router.cpp sebelumnya.
+// Kapasitas harus > 0 dan disesuaikan dengan RAM ESP32.
+static const uint8_t MAX_NEIGHBORS = 16;
+static const uint8_t MAX_BLACKLIST_ENTRIES = 16;
+static const uint8_t MAX_PENDING_RREP_ACKS = 8;
+
+// Jitter HELLO TX (nilai lama: random 0..10 ms).
+static const unsigned long HELLO_JITTER_MAX_MS = 10UL;
+
+// Prioritas antrean TX: angka lebih kecil dikirim lebih dahulu.
+// Pertahankan urutan CONTROL < SOS < RREQ < NORMAL.
+static const uint8_t TX_QUEUE_PRIORITY_CONTROL = 0;
+static const uint8_t TX_QUEUE_PRIORITY_SOS = 1;
+static const uint8_t TX_QUEUE_PRIORITY_RREQ = 2;
+static const uint8_t TX_QUEUE_PRIORITY_NORMAL = 3;
+
 // ================================= LIMITS ==================================
 static const uint8_t MAX_ROUTE_HOPS = NET_DIAMETER;
 static const uint8_t MAX_ROUTE_ENTRIES = 16;
 static const uint8_t MAX_SEEN_RREQ = 48;
 static const uint8_t MAX_SEEN_RERR = 16;
 static const uint8_t MAX_TX_QUEUE = 24;
+static const uint8_t MAX_PENDING_ROUTE_PACKETS = 8;
 static const uint8_t MAX_FIELDS = 16;
 
 // ======================== INA219 / 2S BATTERY ==============================
@@ -101,3 +120,6 @@ static const float BATTERY_LOW_WARNING_PERCENT = 20.0f;
 static const float BATTERY_EMA_ALPHA = 0.15f;
 
 #endif // TX_CONFIG_H
+
+
+

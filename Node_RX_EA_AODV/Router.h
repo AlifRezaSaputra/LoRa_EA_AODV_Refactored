@@ -6,4 +6,3 @@ void routerBegin();
 void routerUpdate();
 
 #endif // RX_ROUTER_H
-
