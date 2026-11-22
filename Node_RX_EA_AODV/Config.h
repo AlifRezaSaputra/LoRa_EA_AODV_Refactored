@@ -47,7 +47,8 @@ static const uint32_t PATH_DISCOVERY_TIME_MS = 2UL * NET_TRAVERSAL_TIME_MS;
 static const uint32_t MY_ROUTE_TIMEOUT_MS = 2UL * ((PATH_DISCOVERY_TIME_MS > ACTIVE_ROUTE_TIMEOUT_MS)
                                                         ? PATH_DISCOVERY_TIME_MS
                                                         : ACTIVE_ROUTE_TIMEOUT_MS);
-static const uint32_t NEXT_HOP_WAIT_MS = NODE_TRAVERSAL_TIME_MS + 10UL;
+// LoRa airtime/turnaround is longer than ns-3 Wi-Fi; allow a bounded RREP-ACK round trip.
+static const uint32_t NEXT_HOP_WAIT_MS = 250UL;
 static const uint32_t BLACKLIST_TIMEOUT_MS = RREQ_RETRIES * NET_TRAVERSAL_TIME_MS;
 static const uint32_t DELETE_PERIOD_MS = 5UL * ((ACTIVE_ROUTE_TIMEOUT_MS > HELLO_INTERVAL_MS)
                                                      ? ACTIVE_ROUTE_TIMEOUT_MS
@@ -61,6 +62,7 @@ static const uint32_t RREQ_SEEN_LIFETIME = PATH_DISCOVERY_TIME_MS;
 static const uint32_t HELLO_INTERVAL = HELLO_INTERVAL_MS;
 static const uint32_t NEIGHBOR_TIMEOUT = NEIGHBOR_TIMEOUT_MS;
 static const uint8_t MAX_ROUTE_TTL = NET_DIAMETER;
+static const uint8_t MAX_ROUTE_HOPS = NET_DIAMETER;
 
 // Timer layanan Basecamp, bukan timer AODV. Dipakai untuk mengumpulkan
 // kandidat jalur Top-K sebelum Basecamp mengirim RREP.
@@ -68,6 +70,17 @@ static const unsigned long ROUTE_DISCOVERY_WINDOW = 900UL;
 static const unsigned long RX_TIMEOUT = 100UL;
 static const unsigned long STATUS_INTERVAL = 5000UL;
 static const unsigned long SOS_ALERT_DURATION = 5000UL;
+
+// ======================= ROUTING TUNING LIMITS ============================
+// Nilai default sama dengan kapasitas hard-coded pada Router.cpp sebelumnya.
+// Kapasitas harus > 0 dan disesuaikan dengan RAM ESP32.
+static const uint8_t MAX_NEIGHBORS = 16;
+static const uint8_t MAX_BLACKLIST_ENTRIES = 16;
+static const uint8_t MAX_PENDING_RREP_ACKS = 8;
+static const uint8_t MAX_COMPLETED_RREQ = 16;
+
+// Lifetime cache DATA RX (nilai lama pada Router.cpp: 120000 ms).
+static const unsigned long SEEN_DATA_LIFETIME_MS = 120000UL;
 
 // ================================= LIMITS ==================================
 static const uint8_t MAX_ROUTE_ENTRIES = 4;
